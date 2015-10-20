@@ -2683,6 +2683,16 @@ static struct config_int ConfigureNamesInt[] =
 		NULL, NULL, NULL
 	},
 
+	{
+		{"join_row_estimate_clamp", PGC_USERSET, QUERY_TUNING_OTHER,
+			gettext_noop("Set the minimum estimated size of a join result."),
+                        NULL
+		},
+		&join_row_estimate_clamp,
+		1, 1, 10000,
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, 0, 0, 0, NULL, NULL, NULL

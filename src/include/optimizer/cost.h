@@ -67,8 +67,10 @@ extern bool enable_material;
 extern bool enable_mergejoin;
 extern bool enable_hashjoin;
 extern int	constraint_exclusion;
+extern int	join_row_estimate_clamp;
 
 extern double clamp_row_est(double nrows);
+extern double clamp_join_row_est(double nrows);
 extern double index_pages_fetched(double tuples_fetched, BlockNumber pages,
 					double index_pages, PlannerInfo *root);
 extern void cost_seqscan(Path *path, PlannerInfo *root, RelOptInfo *baserel,

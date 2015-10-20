@@ -68,6 +68,12 @@
  *-------------------------------------------------------------------------
  */
 
+
+
+/* These parameters are set by GUC */
+int                     join_row_estimate_clamp=1;
+
+
 #include "postgres.h"
 
 #ifdef _MSC_VER
@@ -131,6 +137,7 @@ typedef struct
 	QualCost	total;
 } cost_qual_eval_context;
 
+static double clamp(double nrows, double min);
 static List *extract_nonindex_conditions(List *qual_clauses, List *indexquals);
 static MergeScanSelCache *cached_scansel(PlannerInfo *root,
 			   RestrictInfo *rinfo,
@@ -154,6 +161,17 @@ static double relation_byte_size(double tuples, int width);
 static double page_size(double tuples, int width);
 
 
+double
+clamp(double nrows, double min)
+{
+	if (nrows <= min)
+		nrows = min;
+	else
+		nrows = ceil(nrows);
+
+	return nrows;
+}
+
 /*
  * clamp_row_est
  *		Force a row-count estimate to a sane value.
@@ -166,13 +184,20 @@ clamp_row_est(double nrows)
 	 * better and to avoid possible divide-by-zero when interpolating costs.
 	 * Make it an integer, too.
 	 */
-	if (nrows <= 1.0)
-		nrows = 1.0;
-	else
-		nrows = rint(nrows);
-
-	return nrows;
+	return clamp(nrows, 1.0);
 }
+
+
+/*
+ * clamp_join_row_est
+ *		Force a row-count estimate to a sane value.
+ */
+double 
+clamp_join_row_est(double nrows)
+{
+	return clamp(nrows,(double)join_row_estimate_clamp);
+}
+
 
 
 /*
@@ -3886,7 +3911,7 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 			break;
 	}
 
-	return clamp_row_est(nrows);
+	return clamp_join_row_est(nrows);
 }
 
 /*
