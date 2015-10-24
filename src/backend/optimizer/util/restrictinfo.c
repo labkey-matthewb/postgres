@@ -218,8 +218,8 @@ make_restrictinfo_internal(Expr *clause,
 	restrictinfo->parent_ec = NULL;
 
 	restrictinfo->eval_cost.startup = -1;
-	restrictinfo->norm_selec = -1;
-	restrictinfo->outer_selec = -1;
+	restrictinfo->norm_selec = selectivity(-1);
+	restrictinfo->outer_selec = selectivity(-1);
 
 	restrictinfo->mergeopfamilies = NIL;
 
@@ -233,8 +233,8 @@ make_restrictinfo_internal(Expr *clause,
 
 	restrictinfo->hashjoinoperator = InvalidOid;
 
-	restrictinfo->left_bucketsize = -1;
-	restrictinfo->right_bucketsize = -1;
+	restrictinfo->left_bucketsize = selectivity(-1);
+	restrictinfo->right_bucketsize = selectivity(-1);
 
 	return restrictinfo;
 }

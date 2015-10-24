@@ -1839,13 +1839,13 @@ adjust_appendrel_attrs_mutator(Node *node,
 		 * equivalent to its parent, so still a member of the same EC if any.
 		 */
 		newinfo->eval_cost.startup = -1;
-		newinfo->norm_selec = -1;
-		newinfo->outer_selec = -1;
+		newinfo->norm_selec = selectivity(-1);
+		newinfo->outer_selec = selectivity(-1);
 		newinfo->left_em = NULL;
 		newinfo->right_em = NULL;
 		newinfo->scansel_cache = NIL;
-		newinfo->left_bucketsize = -1;
-		newinfo->right_bucketsize = -1;
+		newinfo->left_bucketsize = selectivity(-1);
+		newinfo->right_bucketsize = selectivity(-1);
 
 		return (Node *) newinfo;
 	}

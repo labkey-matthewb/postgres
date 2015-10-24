@@ -1491,8 +1491,8 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 					list_delete_cell(root->left_join_clauses, cell, prev);
 				/* we throw it back anyway (see notes above) */
 				/* but the thrown-back clause has no extra selectivity */
-				rinfo->norm_selec = 2.0;
-				rinfo->outer_selec = 1.0;
+				rinfo->norm_selec = selectivity(2.0);
+				rinfo->outer_selec = selectivity(1.0);
 				distribute_restrictinfo_to_rels(root, rinfo);
 			}
 			else
@@ -1514,8 +1514,8 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 					list_delete_cell(root->right_join_clauses, cell, prev);
 				/* we throw it back anyway (see notes above) */
 				/* but the thrown-back clause has no extra selectivity */
-				rinfo->norm_selec = 2.0;
-				rinfo->outer_selec = 1.0;
+				rinfo->norm_selec = selectivity(2.0);
+				rinfo->outer_selec = selectivity(1.0);
 				distribute_restrictinfo_to_rels(root, rinfo);
 			}
 			else
@@ -1537,8 +1537,8 @@ reconsider_outer_join_clauses(PlannerInfo *root)
 					list_delete_cell(root->full_join_clauses, cell, prev);
 				/* we throw it back anyway (see notes above) */
 				/* but the thrown-back clause has no extra selectivity */
-				rinfo->norm_selec = 2.0;
-				rinfo->outer_selec = 1.0;
+				rinfo->norm_selec = selectivity(2.0);
+				rinfo->outer_selec = selectivity(1.0);
 				distribute_restrictinfo_to_rels(root, rinfo);
 			}
 			else

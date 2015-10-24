@@ -97,7 +97,7 @@ scalararraysel_containment(PlannerInfo *root,
 	if (!vardata.rel)
 	{
 		ReleaseVariableStats(vardata);
-		return -1.0;
+		return selectivity(-1.0);
 	}
 
 	/*
@@ -106,13 +106,13 @@ scalararraysel_containment(PlannerInfo *root,
 	if (!IsA(leftop, Const))
 	{
 		ReleaseVariableStats(vardata);
-		return -1.0;
+		return selectivity(-1.0);
 	}
 	if (((Const *) leftop)->constisnull)
 	{
 		/* qual can't succeed if null on left */
 		ReleaseVariableStats(vardata);
-		return (Selectivity) 0.0;
+		return selectivity(0.0);
 	}
 	constval = ((Const *) leftop)->constvalue;
 
@@ -121,7 +121,7 @@ scalararraysel_containment(PlannerInfo *root,
 	if (!OidIsValid(typentry->cmp_proc_finfo.fn_oid))
 	{
 		ReleaseVariableStats(vardata);
-		return -1.0;
+		return selectivity(-1.0);
 	}
 	cmpfunc = &typentry->cmp_proc_finfo;
 
@@ -209,7 +209,7 @@ scalararraysel_containment(PlannerInfo *root,
 		/*
 		 * MCE stats count only non-null rows, so adjust for null rows.
 		 */
-		selec *= (1.0 - stats->stanullfrac);
+		selec = selectivity_andnot(selec, selectivity(stats->stanullfrac));
 	}
 	else
 	{
@@ -236,9 +236,9 @@ scalararraysel_containment(PlannerInfo *root,
 	 * If the operator is <>, invert the results.
 	 */
 	if (!isEquality)
-		selec = 1.0 - selec;
+		selec = selectivity_not(selec);
 
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_selectivity(selec);
 
 	return selec;
 }
@@ -313,14 +313,14 @@ arraycontsel(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		selec = DEFAULT_SEL(operator);
+		selec = selectivity(DEFAULT_SEL(operator));
 	}
 
 	ReleaseVariableStats(vardata);
 
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_selectivity(selec);
 
-	PG_RETURN_FLOAT8((float8) selec);
+	PG_RETURN_FLOAT8((float8) selec.selectivity);
 }
 
 /*
@@ -354,7 +354,7 @@ calc_arraycontsel(VariableStatData *vardata, Datum constval,
 	/* Get element type's default comparison function */
 	typentry = lookup_type_cache(elemtype, TYPECACHE_CMP_PROC_FINFO);
 	if (!OidIsValid(typentry->cmp_proc_finfo.fn_oid))
-		return DEFAULT_SEL(operator);
+		return selectivity(DEFAULT_SEL(operator));
 	cmpfunc = &typentry->cmp_proc_finfo;
 
 	/*
@@ -421,7 +421,7 @@ calc_arraycontsel(VariableStatData *vardata, Datum constval,
 		/*
 		 * MCE stats count only non-null rows, so adjust for null rows.
 		 */
-		selec *= (1.0 - stats->stanullfrac);
+		selec = selectivity_andnot(selec, selectivity(stats->stanullfrac));
 	}
 	else
 	{
@@ -491,7 +491,7 @@ mcelem_array_selec(ArrayType *array, TypeCacheEntry *typentry,
 	{
 		pfree(elem_values);
 		pfree(elem_nulls);
-		return (Selectivity) 0.0;
+		return selectivity_none();
 	}
 
 	/* Sort extracted elements using their default comparison function. */
@@ -514,7 +514,7 @@ mcelem_array_selec(ArrayType *array, TypeCacheEntry *typentry,
 	{
 		elog(ERROR, "arraycontsel called for unrecognized operator %u",
 			 operator);
-		selec = 0.0;			/* keep compiler quiet */
+		selec = selectivity_none();			/* keep compiler quiet */
 	}
 
 	pfree(elem_values);
@@ -587,7 +587,7 @@ mcelem_array_contain_overlap_selec(Datum *mcelem, int nmcelem,
 		 * Initial selectivity for "column @> const" query is 1.0, and it will
 		 * be decreased with each element of constant array.
 		 */
-		selec = 1.0;
+		selec = selectivity_all();
 	}
 	else
 	{
@@ -595,7 +595,7 @@ mcelem_array_contain_overlap_selec(Datum *mcelem, int nmcelem,
 		 * Initial selectivity for "column && const" query is 0.0, and it will
 		 * be increased with each element of constant array.
 		 */
-		selec = 0.0;
+		selec = selectivity_none();
 	}
 
 	/* Scan mcelem and array in parallel. */
@@ -637,7 +637,7 @@ mcelem_array_contain_overlap_selec(Datum *mcelem, int nmcelem,
 		if (match && numbers)
 		{
 			/* MCELEM matches the array item; use its frequency. */
-			elem_selec = numbers[mcelem_index];
+			elem_selec = selectivity(numbers[mcelem_index]);
 			mcelem_index++;
 		}
 		else
@@ -646,7 +646,7 @@ mcelem_array_contain_overlap_selec(Datum *mcelem, int nmcelem,
 			 * The element is not in MCELEM.  Punt, but assume that the
 			 * selectivity cannot be more than minfreq / 2.
 			 */
-			elem_selec = Min(DEFAULT_CONTAIN_SEL, minfreq / 2);
+			elem_selec = selectivity(Min(DEFAULT_CONTAIN_SEL, minfreq / 2));
 		}
 
 		/*
@@ -654,12 +654,12 @@ mcelem_array_contain_overlap_selec(Datum *mcelem, int nmcelem,
 		 * and an assumption of element occurrence independence.
 		 */
 		if (operator == OID_ARRAY_CONTAINS_OP)
-			selec *= elem_selec;
+			selec = selectivity_and(selec, elem_selec);
 		else
-			selec = selec + elem_selec - selec * elem_selec;
+			selec = selectivity_or(selec, elem_selec);
 
 		/* Clamp intermediate results to stay sane despite roundoff error */
-		CLAMP_PROBABILITY(selec);
+		selec = constrain_selectivity(selec);
 	}
 
 	return selec;
@@ -742,11 +742,11 @@ mcelem_array_contained_selec(Datum *mcelem, int nmcelem,
 	 * Punt if not right, because we can't do much without the element freqs.
 	 */
 	if (numbers == NULL || nnumbers != nmcelem + 3)
-		return DEFAULT_CONTAIN_SEL;
+		return selectivity(DEFAULT_CONTAIN_SEL);
 
 	/* Can't do much without a count histogram, either */
 	if (hist == NULL || nhist < 3)
-		return DEFAULT_CONTAIN_SEL;
+		return selectivity(DEFAULT_CONTAIN_SEL);
 
 	/*
 	 * Grab some of the summary statistics that compute_array_stats() stores:
@@ -923,9 +923,9 @@ mcelem_array_contained_selec(Datum *mcelem, int nmcelem,
 	/* Take into account occurrence of NULL element. */
 	selec *= (1.0f - nullelem_freq);
 
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_prob(selec);
 
-	return selec;
+	return selectivity(selec);
 }
 
 /*

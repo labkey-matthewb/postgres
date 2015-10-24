@@ -14,6 +14,7 @@
  */
 #include "postgres.h"
 
+#include "nodes/nodes.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
@@ -95,7 +96,7 @@ clauselist_selectivity(PlannerInfo *root,
 					   JoinType jointype,
 					   SpecialJoinInfo *sjinfo)
 {
-	Selectivity s1 = 1.0;
+	Selectivity s1 = selectivity_all();
 	RangeQueryClause *rqlist = NULL;
 	ListCell   *l;
 
@@ -132,7 +133,7 @@ clauselist_selectivity(PlannerInfo *root,
 			rinfo = (RestrictInfo *) clause;
 			if (rinfo->pseudoconstant)
 			{
-				s1 = s1 * s2;
+				s1 = selectivity_and(s1, s2);
 				continue;
 			}
 			clause = (Node *) rinfo->clause;
@@ -188,7 +189,7 @@ clauselist_selectivity(PlannerInfo *root,
 						break;
 					default:
 						/* Just merge the selectivity in generically */
-						s1 = s1 * s2;
+						s1 = selectivity_and(s1, s2);
 						break;
 				}
 				continue;		/* drop to loop bottom */
@@ -196,7 +197,7 @@ clauselist_selectivity(PlannerInfo *root,
 		}
 
 		/* Not the right form, so treat it generically. */
-		s1 = s1 * s2;
+		s1 = selectivity_and(s1, s2);
 	}
 
 	/*
@@ -216,18 +217,18 @@ clauselist_selectivity(PlannerInfo *root,
 			 * selectivity function punted.  This is not airtight but should
 			 * be good enough.
 			 */
-			if (rqlist->hibound == DEFAULT_INEQ_SEL ||
-				rqlist->lobound == DEFAULT_INEQ_SEL)
+			if (rqlist->hibound.selectivity == DEFAULT_INEQ_SEL ||
+				rqlist->lobound.selectivity == DEFAULT_INEQ_SEL)
 			{
-				s2 = DEFAULT_RANGE_INEQ_SEL;
+				s2 = selectivity(DEFAULT_RANGE_INEQ_SEL);
 			}
 			else
 			{
-				s2 = rqlist->hibound + rqlist->lobound - 1.0;
+				s2 = selectivity_overlap(rqlist->hibound, rqlist->lobound);
 
 				/* Adjust for double-exclusion of NULLs */
-				s2 += nulltestsel(root, IS_NULL, rqlist->var,
-								  varRelid, jointype, sjinfo);
+				s2 = selectivity_sum(s2, nulltestsel(root, IS_NULL, rqlist->var,
+								  varRelid, jointype, sjinfo));
 
 				/*
 				 * A zero or slightly negative s2 should be converted into a
@@ -237,15 +238,15 @@ clauselist_selectivity(PlannerInfo *root,
 				 * default selectivity estimates on one or both sides of the
 				 * range that we failed to recognize above for some reason.
 				 */
-				if (s2 <= 0.0)
+				if (s2.selectivity <= 0.0)
 				{
-					if (s2 < -0.01)
+					if (s2.selectivity < -0.01)
 					{
 						/*
 						 * No data available --- use a default estimate that
 						 * is small, but not real small.
 						 */
-						s2 = DEFAULT_RANGE_INEQ_SEL;
+						s2 = selectivity(DEFAULT_RANGE_INEQ_SEL);
 					}
 					else
 					{
@@ -253,20 +254,20 @@ clauselist_selectivity(PlannerInfo *root,
 						 * It's just roundoff error; use a small positive
 						 * value
 						 */
-						s2 = 1.0e-10;
+						s2 = selectivity(1.0e-10);
 					}
 				}
 			}
 			/* Merge in the selectivity of the pair of clauses */
-			s1 *= s2;
+			s1 = selectivity_and(s1, s2);
 		}
 		else
 		{
 			/* Only found one of a pair, merge it in generically */
 			if (rqlist->have_lobound)
-				s1 *= rqlist->lobound;
+				s1 = selectivity_and(s1, rqlist->lobound);
 			else
-				s1 *= rqlist->hibound;
+				s1 = selectivity_and(s1, rqlist->hibound);
 		}
 		/* release storage and advance */
 		rqnext = rqlist->next;
@@ -326,7 +327,7 @@ addRangeClause(RangeQueryClause **rqlist, Node *clause,
 				 * Keep only the more restrictive one.
 				 *------
 				 */
-				if (rqelem->lobound > s2)
+				if (rqelem->lobound.selectivity > s2.selectivity)
 					rqelem->lobound = s2;
 			}
 		}
@@ -346,7 +347,7 @@ addRangeClause(RangeQueryClause **rqlist, Node *clause,
 				 * Keep only the more restrictive one.
 				 *------
 				 */
-				if (rqelem->hibound > s2)
+				if (rqelem->hibound.selectivity > s2.selectivity)
 					rqelem->hibound = s2;
 			}
 		}
@@ -486,7 +487,7 @@ clause_selectivity(PlannerInfo *root,
 				   JoinType jointype,
 				   SpecialJoinInfo *sjinfo)
 {
-	Selectivity s1 = 0.5;		/* default for any unhandled clause type */
+	Selectivity s1 = selectivity(0.5);		/* default for any unhandled clause type */
 	RestrictInfo *rinfo = NULL;
 	bool		cacheable = false;
 
@@ -508,14 +509,14 @@ clause_selectivity(PlannerInfo *root,
 		if (rinfo->pseudoconstant)
 		{
 			if (!IsA(rinfo->clause, Const))
-				return (Selectivity) 1.0;
+				return selectivity_all();
 		}
 
 		/*
 		 * If the clause is marked redundant, always return 1.0.
 		 */
-		if (rinfo->norm_selec > 1)
-			return (Selectivity) 1.0;
+		if (rinfo->norm_selec.selectivity > 1)
+			return selectivity_all();
 
 		/*
 		 * If possible, cache the result of the selectivity calculation for
@@ -534,12 +535,12 @@ clause_selectivity(PlannerInfo *root,
 			/* Cacheable --- do we already have the result? */
 			if (jointype == JOIN_INNER)
 			{
-				if (rinfo->norm_selec >= 0)
+				if (rinfo->norm_selec.selectivity >= 0)
 					return rinfo->norm_selec;
 			}
 			else
 			{
-				if (rinfo->outer_selec >= 0)
+				if (rinfo->outer_selec.selectivity >= 0)
 					return rinfo->outer_selec;
 			}
 			cacheable = true;
@@ -576,8 +577,8 @@ clause_selectivity(PlannerInfo *root,
 		/* bool constant is pretty easy... */
 		Const	   *con = (Const *) clause;
 
-		s1 = con->constisnull ? 0.0 :
-			DatumGetBool(con->constvalue) ? 1.0 : 0.0;
+		s1 = con->constisnull ? selectivity_none() :
+			DatumGetBool(con->constvalue) ? selectivity_all() : selectivity_none();
 	}
 	else if (IsA(clause, Param))
 	{
@@ -589,8 +590,8 @@ clause_selectivity(PlannerInfo *root,
 			/* bool constant is pretty easy... */
 			Const	   *con = (Const *) subst;
 
-			s1 = con->constisnull ? 0.0 :
-				DatumGetBool(con->constvalue) ? 1.0 : 0.0;
+			s1 = con->constisnull ? selectivity_none() :
+				DatumGetBool(con->constvalue) ? selectivity_all() : selectivity_none();
 		}
 		else
 		{
@@ -600,11 +601,12 @@ clause_selectivity(PlannerInfo *root,
 	else if (not_clause(clause))
 	{
 		/* inverse of the selectivity of the underlying clause */
-		s1 = 1.0 - clause_selectivity(root,
+		Selectivity clause_sel = clause_selectivity(root,
 								  (Node *) get_notclausearg((Expr *) clause),
 									  varRelid,
 									  jointype,
 									  sjinfo);
+		s1 = selectivity_not(clause_sel);
 	}
 	else if (and_clause(clause))
 	{
@@ -625,7 +627,7 @@ clause_selectivity(PlannerInfo *root,
 		 */
 		ListCell   *arg;
 
-		s1 = 0.0;
+		s1 = selectivity_none();
 		foreach(arg, ((BoolExpr *) clause)->args)
 		{
 			Selectivity s2 = clause_selectivity(root,
@@ -634,7 +636,7 @@ clause_selectivity(PlannerInfo *root,
 												jointype,
 												sjinfo);
 
-			s1 = s1 + s2 - s1 * s2;
+			s1 = selectivity_or(s1, s2);
 		}
 	}
 	else if (is_opclause(clause) || IsA(clause, DistinctExpr))
@@ -667,7 +669,7 @@ clause_selectivity(PlannerInfo *root,
 		 * but it's better than doing nothing.
 		 */
 		if (IsA(clause, DistinctExpr))
-			s1 = 1.0 - s1;
+			s1 = selectivity_not(s1);
 	}
 	else if (IsA(clause, ScalarArrayOpExpr))
 	{
@@ -716,7 +718,7 @@ clause_selectivity(PlannerInfo *root,
 		RelOptInfo *crel = find_base_rel(root, cexpr->cvarno);
 
 		if (crel->tuples > 0)
-			s1 = 1.0 / crel->tuples;
+			s1 = selectivity_exactly_one_of(crel->tuples);
 	}
 	else if (IsA(clause, RelabelType))
 	{

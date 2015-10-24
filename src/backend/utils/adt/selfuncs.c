@@ -99,6 +99,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <nodes/nodes.h>
 
 #include "access/gin.h"
 #include "access/htup_details.h"
@@ -203,6 +204,54 @@ static Datum string_to_datum(const char *str, Oid datatype);
 static Const *string_to_const(const char *str, Oid datatype);
 static Const *string_to_bytea_const(const char *str, size_t str_len);
 static List *add_predicate_to_quals(IndexOptInfo *index, List *indexQuals);
+
+
+Selectivity selectivity_exactly_one_of(double n)
+{
+	return selectivity(1.0 / n);
+}
+
+Selectivity selectivity_m_of_n(double m, double n)
+{
+	return selectivity(m / Max(m,n));
+}
+
+/* compute selectivity of clauses (assuming no correlation): s1 AND s2 */
+Selectivity selectivity_and(Selectivity s1, Selectivity s2)
+{
+	return selectivity(s1.selectivity * s2.selectivity);
+}
+
+/* compute selectivity of clauses: s1 OR s2 */
+Selectivity selectivity_or(Selectivity s1, Selectivity s2)
+{
+	return selectivity(s1.selectivity + s2.selectivity - s1.selectivity * s2.selectivity);
+}
+
+/* compute the complementary selectivity: NOT s */
+Selectivity selectivity_not(Selectivity s)
+{
+	return selectivity(1.0-s.selectivity);
+}
+
+/* compute the selectivity of clause "subtraction": s1 AND NOT s2 */
+Selectivity selectivity_andnot(Selectivity s1, Selectivity not)
+{
+	return selectivity(s1.selectivity * (1.0-not.selectivity));
+}
+
+/* compute minimal overlap of ranges
+ * to compute BETWEEN a AND b, compute selectivity_overlap(selectivity(<b), selectivity(>a)) */
+Selectivity selectivity_overlap(Selectivity lorange, Selectivity hirange)
+{
+	return selectivity(lorange.selectivity + hirange.selectivity - 1.0);
+}
+
+/* arithmetic combination */
+Selectivity selectivity_sum(Selectivity s1, Selectivity s2)
+{
+	return selectivity(s1.selectivity + s2.selectivity);
+}
 
 
 /*
@@ -1124,7 +1173,7 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 	Pattern_Prefix_Status pstatus;
 	Const	   *patt;
 	Const	   *prefix = NULL;
-	Selectivity rest_selec = 0;
+	Selectivity rest_selec = selectivity_none();
 	double		result;
 
 	/*
@@ -1293,8 +1342,8 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 		/* Try to use the histogram entries to get selectivity */
 		fmgr_info(get_opcode(operator), &opproc);
 
-		selec = histogram_selectivity(&vardata, &opproc, constval, true,
-									  10, 1, &hist_size);
+		selec = selectivity(histogram_selectivity(&vardata, &opproc, constval, true,
+									  10, 1, &hist_size));
 
 		/* If not at least 100 entries, use the heuristic method */
 		if (hist_size < 100)
@@ -1306,10 +1355,10 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 				prefixsel = prefix_selectivity(root, &vardata, vartype,
 											   opfamily, prefix);
 			else
-				prefixsel = 1.0;
-			heursel = prefixsel * rest_selec;
+				prefixsel = selectivity_all();
+			heursel = selectivity_and(prefixsel, rest_selec);
 
-			if (selec < 0)		/* fewer than 10 histogram entries? */
+			if (selec.selectivity < 0)		/* fewer than 10 histogram entries? */
 				selec = heursel;
 			else
 			{
@@ -1320,15 +1369,12 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 				 */
 				double		hist_weight = hist_size / 100.0;
 
-				selec = selec * hist_weight + heursel * (1.0 - hist_weight);
+				selec = selectivity(selec.selectivity * hist_weight + heursel.selectivity * (1.0 - hist_weight));
 			}
 		}
 
 		/* In any case, don't believe extremely small or large estimates. */
-		if (selec < 0.0001)
-			selec = 0.0001;
-		else if (selec > 0.9999)
-			selec = 0.9999;
+		selec = selectivity(constrain(selec.selectivity, 0.0001, 0.9999));
 
 		/*
 		 * If we have most-common-values info, add up the fractions of the MCV
@@ -1349,12 +1395,12 @@ patternsel(PG_FUNCTION_ARGS, Pattern_Type ptype, bool negate)
 		 * realizing that the histogram covers only the non-null values that
 		 * are not listed in MCV.
 		 */
-		selec *= 1.0 - nullfrac - sumcommon;
-		selec += mcv_selec;
+		selec = selectivity(selec.selectivity * (1.0 - nullfrac - sumcommon));
+		selec = selectivity(selec.selectivity + mcv_selec);
 
 		/* result should be in range, but make sure... */
-		CLAMP_PROBABILITY(selec);
-		result = selec;
+		selec = constrain_selectivity(selec);
+		result = selec.selectivity;
 	}
 
 	if (prefix)
@@ -1481,7 +1527,7 @@ boolvarsel(PlannerInfo *root, Node *arg, int varRelid)
 		selec = 0.5;
 	}
 	ReleaseVariableStats(vardata);
-	return selec;
+	return selectivity(selec);
 }
 
 /*
@@ -1623,15 +1669,15 @@ booltestsel(PlannerInfo *root, BoolTestType booltesttype, Node *arg,
 				break;
 			case IS_TRUE:
 			case IS_NOT_FALSE:
-				selec = (double) clause_selectivity(root, arg,
+				selec = clause_selectivity(root, arg,
 													varRelid,
-													jointype, sjinfo);
+													jointype, sjinfo).selectivity;
 				break;
 			case IS_FALSE:
 			case IS_NOT_TRUE:
-				selec = 1.0 - (double) clause_selectivity(root, arg,
+				selec = 1.0 - clause_selectivity(root, arg,
 														  varRelid,
-														  jointype, sjinfo);
+														  jointype, sjinfo).selectivity;
 				break;
 			default:
 				elog(ERROR, "unrecognized booltesttype: %d",
@@ -1646,7 +1692,7 @@ booltestsel(PlannerInfo *root, BoolTestType booltesttype, Node *arg,
 	/* result should be in range, but make sure... */
 	CLAMP_PROBABILITY(selec);
 
-	return (Selectivity) selec;
+	return selectivity(selec);
 }
 
 /*
@@ -1689,7 +1735,7 @@ nulltestsel(PlannerInfo *root, NullTestType nulltesttype, Node *arg,
 			default:
 				elog(ERROR, "unrecognized nulltesttype: %d",
 					 (int) nulltesttype);
-				return (Selectivity) 0; /* keep compiler quiet */
+				return selectivity_none(); /* keep compiler quiet */
 		}
 	}
 	else
@@ -1708,16 +1754,16 @@ nulltestsel(PlannerInfo *root, NullTestType nulltesttype, Node *arg,
 			default:
 				elog(ERROR, "unrecognized nulltesttype: %d",
 					 (int) nulltesttype);
-				return (Selectivity) 0; /* keep compiler quiet */
+				return selectivity_none(); /* keep compiler quiet */
 		}
 	}
 
 	ReleaseVariableStats(vardata);
 
 	/* result should be in range, but make sure... */
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_prob(selec);
 
-	return (Selectivity) selec;
+	return selectivity(selec);
 }
 
 /*
@@ -1786,7 +1832,7 @@ scalararraysel(PlannerInfo *root,
 	/* get nominal (after relabeling) element type of rightop */
 	nominal_element_type = get_base_element_type(exprType(rightop));
 	if (!OidIsValid(nominal_element_type))
-		return (Selectivity) 0.5;		/* probably shouldn't happen */
+		return selectivity(0.5);		/* probably shouldn't happen */
 	/* get nominal collation, too, for generating constants */
 	nominal_element_collation = exprCollation(rightop);
 
@@ -1817,7 +1863,7 @@ scalararraysel(PlannerInfo *root,
 		s1 = scalararraysel_containment(root, leftop, rightop,
 										nominal_element_type,
 										isEquality, useOr, varRelid);
-		if (s1 >= 0.0)
+		if (s1.selectivity >= 0.0)
 			return s1;
 	}
 
@@ -1830,7 +1876,7 @@ scalararraysel(PlannerInfo *root,
 	else
 		oprsel = get_oprrest(operator);
 	if (!oprsel)
-		return (Selectivity) 0.5;
+		return selectivity(0.5);
 	fmgr_info(oprsel, &oprselproc);
 
 	/*
@@ -1872,7 +1918,7 @@ scalararraysel(PlannerInfo *root,
 		int			i;
 
 		if (arrayisnull)		/* qual can't succeed if null array */
-			return (Selectivity) 0.0;
+			return selectivity_none();
 		arrayval = DatumGetArrayTypeP(arraydatum);
 		get_typlenbyvalalign(ARR_ELEMTYPE(arrayval),
 							 &elmlen, &elmbyval, &elmalign);
@@ -1895,7 +1941,7 @@ scalararraysel(PlannerInfo *root,
 		 * disjointness assumption leads to an impossible (out of range)
 		 * probability; if so, we fall back to the normal calculation.
 		 */
-		s1 = s1disjoint = (useOr ? 0.0 : 1.0);
+		s1 = s1disjoint = (useOr ? selectivity(0.0) : selectivity(1.0));
 
 		for (i = 0; i < num_elems; i++)
 		{
@@ -1911,38 +1957,38 @@ scalararraysel(PlannerInfo *root,
 										elem_nulls[i],
 										elmbyval));
 			if (is_join_clause)
-				s2 = DatumGetFloat8(FunctionCall5Coll(&oprselproc,
+				s2 = selectivity(DatumGetFloat8(FunctionCall5Coll(&oprselproc,
 													  clause->inputcollid,
 													  PointerGetDatum(root),
 												  ObjectIdGetDatum(operator),
 													  PointerGetDatum(args),
 													  Int16GetDatum(jointype),
-												   PointerGetDatum(sjinfo)));
+												   PointerGetDatum(sjinfo))));
 			else
-				s2 = DatumGetFloat8(FunctionCall4Coll(&oprselproc,
+				s2 = selectivity(DatumGetFloat8(FunctionCall4Coll(&oprselproc,
 													  clause->inputcollid,
 													  PointerGetDatum(root),
 												  ObjectIdGetDatum(operator),
 													  PointerGetDatum(args),
-												   Int32GetDatum(varRelid)));
+												   Int32GetDatum(varRelid))));
 
 			if (useOr)
 			{
-				s1 = s1 + s2 - s1 * s2;
+				s1 = selectivity_or(s1, s2);
 				if (isEquality)
-					s1disjoint += s2;
+					s1disjoint = selectivity_and(s1disjoint, s2);
 			}
 			else
 			{
-				s1 = s1 * s2;
+				s1 = selectivity_and(s1, s2);
 				if (isInequality)
-					s1disjoint += s2 - 1.0;
+					s1disjoint = selectivity_overlap(s1disjoint, s2);
 			}
 		}
 
 		/* accept disjoint-probability estimate if in range */
 		if ((useOr ? isEquality : isInequality) &&
-			s1disjoint >= 0.0 && s1disjoint <= 1.0)
+			s1disjoint.selectivity >= 0.0 && s1disjoint.selectivity <= 1.0)
 			s1 = s1disjoint;
 	}
 	else if (rightop && IsA(rightop, ArrayExpr) &&
@@ -1963,7 +2009,7 @@ scalararraysel(PlannerInfo *root,
 		 * would have reduced the ArrayExpr to a Const).  In this path it's
 		 * critical to have the sanity check on the s1disjoint estimate.
 		 */
-		s1 = s1disjoint = (useOr ? 0.0 : 1.0);
+		s1 = s1disjoint = (useOr ? selectivity_none() : selectivity_all());
 
 		foreach(l, arrayexpr->elements)
 		{
@@ -1978,38 +2024,38 @@ scalararraysel(PlannerInfo *root,
 			 */
 			args = list_make2(leftop, elem);
 			if (is_join_clause)
-				s2 = DatumGetFloat8(FunctionCall5Coll(&oprselproc,
+				s2 = selectivity(DatumGetFloat8(FunctionCall5Coll(&oprselproc,
 													  clause->inputcollid,
 													  PointerGetDatum(root),
 												  ObjectIdGetDatum(operator),
 													  PointerGetDatum(args),
 													  Int16GetDatum(jointype),
-												   PointerGetDatum(sjinfo)));
+												   PointerGetDatum(sjinfo))));
 			else
-				s2 = DatumGetFloat8(FunctionCall4Coll(&oprselproc,
+				s2 = selectivity(DatumGetFloat8(FunctionCall4Coll(&oprselproc,
 													  clause->inputcollid,
 													  PointerGetDatum(root),
 												  ObjectIdGetDatum(operator),
 													  PointerGetDatum(args),
-												   Int32GetDatum(varRelid)));
+												   Int32GetDatum(varRelid))));
 
 			if (useOr)
 			{
-				s1 = s1 + s2 - s1 * s2;
+				s1 = selectivity_or(s1, s2);
 				if (isEquality)
-					s1disjoint += s2;
+					s1disjoint = selectivity_sum(s1disjoint, s2);
 			}
 			else
 			{
-				s1 = s1 * s2;
+				s1 = selectivity(s1.selectivity * s2.selectivity);
 				if (isInequality)
-					s1disjoint += s2 - 1.0;
+					s1disjoint = selectivity_overlap(s1disjoint, s2);
 			}
 		}
 
 		/* accept disjoint-probability estimate if in range */
 		if ((useOr ? isEquality : isInequality) &&
-			s1disjoint >= 0.0 && s1disjoint <= 1.0)
+			s1disjoint.selectivity >= 0.0 && s1disjoint.selectivity <= 1.0)
 			s1 = s1disjoint;
 	}
 	else
@@ -2030,21 +2076,21 @@ scalararraysel(PlannerInfo *root,
 		dummyexpr->collation = clause->inputcollid;
 		args = list_make2(leftop, dummyexpr);
 		if (is_join_clause)
-			s2 = DatumGetFloat8(FunctionCall5Coll(&oprselproc,
+			s2 = selectivity(DatumGetFloat8(FunctionCall5Coll(&oprselproc,
 												  clause->inputcollid,
 												  PointerGetDatum(root),
 												  ObjectIdGetDatum(operator),
 												  PointerGetDatum(args),
 												  Int16GetDatum(jointype),
-												  PointerGetDatum(sjinfo)));
+												  PointerGetDatum(sjinfo))));
 		else
-			s2 = DatumGetFloat8(FunctionCall4Coll(&oprselproc,
+			s2 = selectivity(DatumGetFloat8(FunctionCall4Coll(&oprselproc,
 												  clause->inputcollid,
 												  PointerGetDatum(root),
 												  ObjectIdGetDatum(operator),
 												  PointerGetDatum(args),
-												  Int32GetDatum(varRelid)));
-		s1 = useOr ? 0.0 : 1.0;
+												  Int32GetDatum(varRelid))));
+		s1 = useOr ? selectivity_none() : selectivity_all();
 
 		/*
 		 * Arbitrarily assume 10 elements in the eventual array value (see
@@ -2054,14 +2100,14 @@ scalararraysel(PlannerInfo *root,
 		for (i = 0; i < 10; i++)
 		{
 			if (useOr)
-				s1 = s1 + s2 - s1 * s2;
+				s1 = selectivity_or(s1, s2);
 			else
-				s1 = s1 * s2;
+				s1 = selectivity_and(s1, s2);
 		}
 	}
 
 	/* result should be in range, but make sure... */
-	CLAMP_PROBABILITY(s1);
+	s1 = constrain_selectivity(s1);
 
 	return s1;
 }
@@ -2830,8 +2876,8 @@ icnlikejoinsel(PG_FUNCTION_ARGS)
 void
 mergejoinscansel(PlannerInfo *root, Node *clause,
 				 Oid opfamily, int strategy, bool nulls_first,
-				 Selectivity *leftstart, Selectivity *leftend,
-				 Selectivity *rightstart, Selectivity *rightend)
+				 double *leftstart, double *leftend,
+				 double *rightstart, double *rightend)
 {
 	Node	   *left,
 			   *right;
@@ -3512,7 +3558,7 @@ estimate_hash_bucketsize(PlannerInfo *root, Node *hashkey, double nbuckets)
 	if (isdefault)
 	{
 		ReleaseVariableStats(vardata);
-		return (Selectivity) 0.1;
+		return selectivity(0.1);
 	}
 
 	/* Get fraction that are null */
@@ -3592,7 +3638,7 @@ estimate_hash_bucketsize(PlannerInfo *root, Node *hashkey, double nbuckets)
 
 	ReleaseVariableStats(vardata);
 
-	return (Selectivity) estfract;
+	return selectivity(estfract);
 }
 
 
@@ -5397,7 +5443,7 @@ regex_fixed_prefix(Const *patt_const, bool case_insensitive, Oid collation,
 		if (exact)
 		{
 			/* Exact match, so there's no additional selectivity */
-			*rest_selec = 1.0;
+			*rest_selec = selectivity_all();
 		}
 		else
 		{
@@ -5485,14 +5531,14 @@ prefix_selectivity(PlannerInfo *root, VariableStatData *vardata,
 		elog(ERROR, "no >= operator for opfamily %u", opfamily);
 	fmgr_info(get_opcode(cmpopr), &opproc);
 
-	prefixsel = ineq_histogram_selectivity(root, vardata, &opproc, true,
+	prefixsel = selectivity(ineq_histogram_selectivity(root, vardata, &opproc, true,
 										   prefixcon->constvalue,
-										   prefixcon->consttype);
+										   prefixcon->consttype));
 
-	if (prefixsel < 0.0)
+	if (prefixsel.selectivity < 0.0)
 	{
 		/* No histogram is present ... return a suitable default estimate */
-		return DEFAULT_MATCH_SEL;
+		return selectivity(DEFAULT_MATCH_SEL);
 	}
 
 	/*-------
@@ -5511,12 +5557,12 @@ prefix_selectivity(PlannerInfo *root, VariableStatData *vardata,
 	{
 		Selectivity topsel;
 
-		topsel = ineq_histogram_selectivity(root, vardata, &opproc, false,
+		topsel = selectivity(ineq_histogram_selectivity(root, vardata, &opproc, false,
 											greaterstrcon->constvalue,
-											greaterstrcon->consttype);
+											greaterstrcon->consttype));
 
 		/* ineq_histogram_selectivity worked before, it shouldn't fail now */
-		Assert(topsel >= 0.0);
+		Assert(topsel.selectivity >= 0.0);
 
 		/*
 		 * Merge the two selectivities in the same way as for a range query
@@ -5524,7 +5570,7 @@ prefix_selectivity(PlannerInfo *root, VariableStatData *vardata,
 		 * about double-exclusion of nulls, since ineq_histogram_selectivity
 		 * doesn't count those anyway.
 		 */
-		prefixsel = topsel + prefixsel - 1.0;
+		prefixsel = selectivity_overlap(topsel, prefixsel);
 	}
 
 	/*
@@ -5544,10 +5590,10 @@ prefix_selectivity(PlannerInfo *root, VariableStatData *vardata,
 								 BTEqualStrategyNumber);
 	if (cmpopr == InvalidOid)
 		elog(ERROR, "no = operator for opfamily %u", opfamily);
-	eq_sel = var_eq_const(vardata, cmpopr, prefixcon->constvalue,
-						  false, true);
+	eq_sel = selectivity(var_eq_const(vardata, cmpopr, prefixcon->constvalue,
+						  false, true));
 
-	prefixsel = Max(prefixsel, eq_sel);
+	prefixsel = selectivity(Max(prefixsel.selectivity, eq_sel.selectivity));
 
 	return prefixsel;
 }
@@ -5572,8 +5618,8 @@ prefix_selectivity(PlannerInfo *root, VariableStatData *vardata,
 static Selectivity
 like_selectivity(const char *patt, int pattlen, bool case_insensitive)
 {
-	Selectivity sel = 1.0;
-	int			pos;
+	double sel = 1.0;
+	int	   pos;
 
 	/* Skip any leading wildcard; it's already factored into initial sel */
 	for (pos = 0; pos < pattlen; pos++)
@@ -5601,15 +5647,14 @@ like_selectivity(const char *patt, int pattlen, bool case_insensitive)
 			sel *= FIXED_CHAR_SEL;
 	}
 	/* Could get sel > 1 if multiple wildcards */
-	if (sel > 1.0)
-		sel = 1.0;
-	return sel;
+	sel = constrain_prob(sel);
+	return selectivity(sel);
 }
 
 static Selectivity
 regex_selectivity_sub(const char *patt, int pattlen, bool case_insensitive)
 {
-	Selectivity sel = 1.0;
+	double	 	sel = 1.0;
 	int			paren_depth = 0;
 	int			paren_pos = 0;	/* dummy init to keep compiler quiet */
 	int			pos;
@@ -5628,7 +5673,7 @@ regex_selectivity_sub(const char *patt, int pattlen, bool case_insensitive)
 			if (paren_depth == 0)
 				sel *= regex_selectivity_sub(patt + (paren_pos + 1),
 											 pos - (paren_pos + 1),
-											 case_insensitive);
+											 case_insensitive).selectivity;
 		}
 		else if (patt[pos] == '|' && paren_depth == 0)
 		{
@@ -5638,7 +5683,7 @@ regex_selectivity_sub(const char *patt, int pattlen, bool case_insensitive)
 			 */
 			sel += regex_selectivity_sub(patt + (pos + 1),
 										 pattlen - (pos + 1),
-										 case_insensitive);
+										 case_insensitive).selectivity;
 			break;				/* rest of pattern is now processed */
 		}
 		else if (patt[pos] == '[')
@@ -5696,26 +5741,26 @@ regex_selectivity_sub(const char *patt, int pattlen, bool case_insensitive)
 	/* Could get sel > 1 if multiple wildcards */
 	if (sel > 1.0)
 		sel = 1.0;
-	return sel;
+	return selectivity(sel);
 }
 
 static Selectivity
 regex_selectivity(const char *patt, int pattlen, bool case_insensitive,
 				  int fixed_prefix_len)
 {
-	Selectivity sel;
+	double sel;
 
 	/* If patt doesn't end with $, consider it to have a trailing wildcard */
 	if (pattlen > 0 && patt[pattlen - 1] == '$' &&
 		(pattlen == 1 || patt[pattlen - 2] != '\\'))
 	{
 		/* has trailing $ */
-		sel = regex_selectivity_sub(patt, pattlen - 1, case_insensitive);
+		sel = regex_selectivity_sub(patt, pattlen - 1, case_insensitive).selectivity;
 	}
 	else
 	{
 		/* no trailing $ */
-		sel = regex_selectivity_sub(patt, pattlen, case_insensitive);
+		sel = regex_selectivity_sub(patt, pattlen, case_insensitive).selectivity;
 		sel *= FULL_WILDCARD_SEL;
 	}
 
@@ -5725,7 +5770,7 @@ regex_selectivity(const char *patt, int pattlen, bool case_insensitive,
 
 	/* Make sure result stays in range */
 	CLAMP_PROBABILITY(sel);
-	return sel;
+	return selectivity(sel);
 }
 
 
@@ -6267,7 +6312,7 @@ genericcostestimate(PlannerInfo *root,
 	numIndexTuples = costs->numIndexTuples;
 	if (numIndexTuples <= 0.0)
 	{
-		numIndexTuples = indexSelectivity * index->rel->tuples;
+		numIndexTuples = indexSelectivity.selectivity * index->rel->tuples;
 
 		/*
 		 * The above calculation counts all the tuples visited across all
@@ -6583,7 +6628,7 @@ btcostestimate(PG_FUNCTION_ARGS)
 												  index->rel->relid,
 												  JOIN_INNER,
 												  NULL);
-		numIndexTuples = btreeSelectivity * index->rel->tuples;
+		numIndexTuples = btreeSelectivity.selectivity * index->rel->tuples;
 
 		/*
 		 * As in genericcostestimate(), we have to adjust for any
@@ -7230,7 +7275,7 @@ gincostestimate(PG_FUNCTION_ARGS)
 	double		loop_count = PG_GETARG_FLOAT8(2);
 	Cost	   *indexStartupCost = (Cost *) PG_GETARG_POINTER(3);
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(4);
-	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(5);
+	double     *indexSelectivity = (double *) PG_GETARG_POINTER(5);
 	double	   *indexCorrelation = (double *) PG_GETARG_POINTER(6);
 	IndexOptInfo *index = path->indexinfo;
 	List	   *indexQuals = path->indexquals;
@@ -7325,7 +7370,7 @@ gincostestimate(PG_FUNCTION_ARGS)
 	*indexSelectivity = clauselist_selectivity(root, selectivityQuals,
 											   index->rel->relid,
 											   JOIN_INNER,
-											   NULL);
+											   NULL).selectivity;
 
 	/* fetch estimated page cost for tablespace containing index */
 	get_tablespace_page_costs(index->reltablespace,
@@ -7519,7 +7564,7 @@ brincostestimate(PG_FUNCTION_ARGS)
 	double		loop_count = PG_GETARG_FLOAT8(2);
 	Cost	   *indexStartupCost = (Cost *) PG_GETARG_POINTER(3);
 	Cost	   *indexTotalCost = (Cost *) PG_GETARG_POINTER(4);
-	Selectivity *indexSelectivity = (Selectivity *) PG_GETARG_POINTER(5);
+	double     *indexSelectivity = (double *) PG_GETARG_POINTER(5);
 	double	   *indexCorrelation = (double *) PG_GETARG_POINTER(6);
 	IndexOptInfo *index = path->indexinfo;
 	List	   *indexQuals = path->indexquals;
@@ -7557,7 +7602,7 @@ brincostestimate(PG_FUNCTION_ARGS)
 	*indexSelectivity =
 		clauselist_selectivity(root, indexQuals,
 							   path->indexinfo->rel->relid,
-							   JOIN_INNER, NULL);
+							   JOIN_INNER, NULL).selectivity;
 	*indexCorrelation = 1;
 
 	/*

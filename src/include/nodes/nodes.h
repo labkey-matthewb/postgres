@@ -545,15 +545,33 @@ extern bool equal(const void *a, const void *b);
 
 /*
  * Typedefs for identifying qualifier selectivities and plan costs as such.
- * These are just plain "double"s, but declaring a variable as Selectivity
+ * These are just wrapped "double"s, but declaring a variable as Selectivity
  * or Cost makes the intent more obvious.
  *
  * These could have gone into plannodes.h or some such, but many files
  * depend on them...
  */
-typedef double Selectivity;		/* fraction of tuples a qualifier will pass */
-typedef double Cost;			/* execution cost (in page-access units) */
+typedef struct
+{
+	double selectivity;			/* [0.0,1.0] fraction of tuples accepted by operation */
+} Selectivity;
 
+#define selectivity(d)     		((Selectivity){.selectivity=d})
+#define selectivity_all()  		((Selectivity){.selectivity=1.0})
+#define selectivity_none() 		((Selectivity){.selectivity=0.0})
+#define constrain(d,mn,mx) 		((d) <= (mn) ? (mn) : (d) > (mx) ? (mx) : (d))
+#define constrain_prob(d) 		((d) <= 0.0 ? 0.0 : (d) > 1.0 ? 1.0 : (d))
+#define constrain_selectivity(s) (selectivity(constrain_prob((s).selectivity)))
+
+
+
+/*
+ * It might be nice to make Cost a struct as well, but there isn't an immediate use case.
+ * and it would require changing a lot of code.
+ */
+typedef double Cost;
+#define cost(d)					((double)d)
+#define cost_zero()				(0.0)
 
 /*
  * CmdType -
