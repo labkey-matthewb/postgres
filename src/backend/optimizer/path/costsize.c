@@ -428,7 +428,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count)
 	run_cost += indexTotalCost - indexStartupCost;
 
 	/* estimate number of main-table tuples fetched */
-	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
+	tuples_fetched = clamp_row_est(indexSelectivity.selectivity * baserel->tuples);
 
 	/* fetch estimated page costs for tablespace containing table */
 	get_tablespace_page_costs(baserel->reltablespace,
@@ -492,7 +492,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count)
 		 * where such a plan is actually interesting, only one page would get
 		 * fetched per scan anyway, so it shouldn't matter much.)
 		 */
-		pages_fetched = ceil(indexSelectivity * (double) baserel->pages);
+		pages_fetched = ceil(indexSelectivity.selectivity * (double) baserel->pages);
 
 		pages_fetched = index_pages_fetched(pages_fetched * loop_count,
 											baserel->pages,
@@ -522,7 +522,7 @@ cost_index(IndexPath *path, PlannerInfo *root, double loop_count)
 		max_IO_cost = pages_fetched * spc_random_page_cost;
 
 		/* min_IO_cost is for the perfectly correlated case (csquared=1) */
-		pages_fetched = ceil(indexSelectivity * (double) baserel->pages);
+		pages_fetched = ceil(indexSelectivity.selectivity * (double) baserel->pages);
 
 		if (indexonly)
 			pages_fetched = ceil(pages_fetched * (1.0 - baserel->allvisfrac));
@@ -803,7 +803,7 @@ cost_bitmap_heap_scan(Path *path, PlannerInfo *root, RelOptInfo *baserel,
 	/*
 	 * Estimate number of main-table pages fetched.
 	 */
-	tuples_fetched = clamp_row_est(indexSelectivity * baserel->tuples);
+	tuples_fetched = clamp_row_est(indexSelectivity.selectivity * baserel->tuples);
 
 	T = (baserel->pages > 1) ? (double) baserel->pages : 1.0;
 
@@ -904,7 +904,8 @@ cost_bitmap_tree_node(Path *path, Cost *cost, Selectivity *selec)
 	else
 	{
 		elog(ERROR, "unrecognized node type: %d", nodeTag(path));
-		*cost = *selec = 0;		/* keep compiler quiet */
+		*cost = 0;						/* keep compiler quiet */
+		*selec = selectivity_none();	/* keep compiler quiet */
 	}
 }
 
@@ -935,7 +936,7 @@ cost_bitmap_and_node(BitmapAndPath *path, PlannerInfo *root)
 	 * definitely too simplistic?
 	 */
 	totalCost = 0.0;
-	selec = 1.0;
+	selec = selectivity_all();
 	foreach(l, path->bitmapquals)
 	{
 		Path	   *subpath = (Path *) lfirst(l);
@@ -944,7 +945,7 @@ cost_bitmap_and_node(BitmapAndPath *path, PlannerInfo *root)
 
 		cost_bitmap_tree_node(subpath, &subCost, &subselec);
 
-		selec *= subselec;
+		selec = selectivity_and(selec, subselec);
 
 		totalCost += subCost;
 		if (l != list_head(path->bitmapquals))
@@ -980,7 +981,7 @@ cost_bitmap_or_node(BitmapOrPath *path, PlannerInfo *root)
 	 * optimized out when the inputs are BitmapIndexScans.
 	 */
 	totalCost = 0.0;
-	selec = 0.0;
+	selec = selectivity_none();
 	foreach(l, path->bitmapquals)
 	{
 		Path	   *subpath = (Path *) lfirst(l);
@@ -989,14 +990,14 @@ cost_bitmap_or_node(BitmapOrPath *path, PlannerInfo *root)
 
 		cost_bitmap_tree_node(subpath, &subCost, &subselec);
 
-		selec += subselec;
+		selec = selectivity_sum(selec, subselec);
 
 		totalCost += subCost;
 		if (l != list_head(path->bitmapquals) &&
 			!IsA(subpath, IndexPath))
 			totalCost += 100.0 * cpu_operator_cost;
 	}
-	path->bitmapselectivity = Min(selec, 1.0);
+	path->bitmapselectivity = constrain_selectivity(selec);
 	path->path.rows = 0;		/* per above, not used */
 	path->path.startup_cost = totalCost;
 	path->path.total_cost = totalCost;
@@ -1945,14 +1946,14 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 		 * clamp inner_scan_frac to at most 1.0; but since match_count is at
 		 * least 1, no such clamp is needed now.)
 		 */
-		outer_matched_rows = rint(outer_path_rows * semifactors->outer_match_frac);
-		inner_scan_frac = 2.0 / (semifactors->match_count + 1.0);
+		outer_matched_rows = rint(outer_path_rows * semifactors->outer_match_frac.selectivity);
+		inner_scan_frac = selectivity(2.0 / (semifactors->match_count.selectivity + 1.0));
 
 		/*
 		 * Compute number of tuples processed (not number emitted!).  First,
 		 * account for successfully-matched outer rows.
 		 */
-		ntuples = outer_matched_rows * inner_path_rows * inner_scan_frac;
+		ntuples = outer_matched_rows * inner_path_rows * inner_scan_frac.selectivity;
 
 		/*
 		 * Now we need to estimate the actual costs of scanning the inner
@@ -1979,9 +1980,9 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 			 * case, use inner_run_cost for the first matched tuple and
 			 * inner_rescan_run_cost for additional ones.
 			 */
-			run_cost += inner_run_cost * inner_scan_frac;
+			run_cost += inner_run_cost * inner_scan_frac.selectivity;
 			if (outer_matched_rows > 1)
-				run_cost += (outer_matched_rows - 1) * inner_rescan_run_cost * inner_scan_frac;
+				run_cost += (outer_matched_rows - 1) * inner_rescan_run_cost * inner_scan_frac.selectivity;
 
 			/*
 			 * Add the cost of inner-scan executions for unmatched outer rows.
@@ -2012,7 +2013,7 @@ final_cost_nestloop(PlannerInfo *root, NestPath *path,
 
 			/* Add inner run cost for additional outer tuples having matches */
 			if (outer_matched_rows > 1)
-				run_cost += (outer_matched_rows - 1) * inner_rescan_run_cost * inner_scan_frac;
+				run_cost += (outer_matched_rows - 1) * inner_rescan_run_cost * inner_scan_frac.selectivity;
 
 			/* Add inner run cost for unmatched outer tuples */
 			run_cost += (outer_path_rows - outer_matched_rows) *
@@ -2157,30 +2158,30 @@ initial_cost_mergejoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 		if (jointype == JOIN_LEFT ||
 			jointype == JOIN_ANTI)
 		{
-			outerstartsel = 0.0;
-			outerendsel = 1.0;
+			outerstartsel = selectivity_none();
+			outerendsel = selectivity_all();
 		}
 		else if (jointype == JOIN_RIGHT)
 		{
-			innerstartsel = 0.0;
-			innerendsel = 1.0;
+			innerstartsel = selectivity_none();
+			innerendsel = selectivity_all();
 		}
 	}
 	else
 	{
 		/* cope with clauseless or full mergejoin */
-		outerstartsel = innerstartsel = 0.0;
-		outerendsel = innerendsel = 1.0;
+		outerstartsel = innerstartsel = selectivity_none();
+		outerendsel = innerendsel = selectivity_all();
 	}
 
 	/*
 	 * Convert selectivities to row counts.  We force outer_rows and
 	 * inner_rows to be at least 1, but the skip_rows estimates can be zero.
 	 */
-	outer_skip_rows = rint(outer_path_rows * outerstartsel);
-	inner_skip_rows = rint(inner_path_rows * innerstartsel);
-	outer_rows = clamp_row_est(outer_path_rows * outerendsel);
-	inner_rows = clamp_row_est(inner_path_rows * innerendsel);
+	outer_skip_rows = rint(outer_path_rows * outerstartsel.selectivity);
+	inner_skip_rows = rint(inner_path_rows * innerstartsel.selectivity);
+	outer_rows = clamp_row_est(outer_path_rows * outerendsel.selectivity);
+	inner_rows = clamp_row_est(inner_path_rows * innerendsel.selectivity);
 
 	Assert(outer_skip_rows <= outer_rows);
 	Assert(inner_skip_rows <= inner_rows);
@@ -2190,13 +2191,13 @@ initial_cost_mergejoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 	 * normally an insignificant effect, but when there are only a few rows in
 	 * the inputs, failing to do this makes for a large percentage error.
 	 */
-	outerstartsel = outer_skip_rows / outer_path_rows;
-	innerstartsel = inner_skip_rows / inner_path_rows;
-	outerendsel = outer_rows / outer_path_rows;
-	innerendsel = inner_rows / inner_path_rows;
+	outerstartsel = selectivity(outer_skip_rows / outer_path_rows);
+	innerstartsel = selectivity(inner_skip_rows / inner_path_rows);
+	outerendsel = selectivity(outer_rows / outer_path_rows);
+	innerendsel = selectivity(inner_rows / inner_path_rows);
 
-	Assert(outerstartsel <= outerendsel);
-	Assert(innerstartsel <= innerendsel);
+	Assert(outerstartsel.selectivity <= outerendsel.selectivity);
+	Assert(innerstartsel.selectivity <= innerendsel.selectivity);
 
 	/* cost of source data */
 
@@ -2213,17 +2214,17 @@ initial_cost_mergejoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 				  -1.0);
 		startup_cost += sort_path.startup_cost;
 		startup_cost += (sort_path.total_cost - sort_path.startup_cost)
-			* outerstartsel;
+			* outerstartsel.selectivity;
 		run_cost += (sort_path.total_cost - sort_path.startup_cost)
-			* (outerendsel - outerstartsel);
+			* (outerendsel.selectivity - outerstartsel.selectivity);
 	}
 	else
 	{
 		startup_cost += outer_path->startup_cost;
 		startup_cost += (outer_path->total_cost - outer_path->startup_cost)
-			* outerstartsel;
+			* outerstartsel.selectivity;
 		run_cost += (outer_path->total_cost - outer_path->startup_cost)
-			* (outerendsel - outerstartsel);
+			* (outerendsel.selectivity - outerstartsel.selectivity);
 	}
 
 	if (innersortkeys)			/* do we need to sort inner? */
@@ -2239,17 +2240,17 @@ initial_cost_mergejoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 				  -1.0);
 		startup_cost += sort_path.startup_cost;
 		startup_cost += (sort_path.total_cost - sort_path.startup_cost)
-			* innerstartsel;
+			* innerstartsel.selectivity;
 		inner_run_cost = (sort_path.total_cost - sort_path.startup_cost)
-			* (innerendsel - innerstartsel);
+			* (innerendsel.selectivity - innerstartsel.selectivity);
 	}
 	else
 	{
 		startup_cost += inner_path->startup_cost;
 		startup_cost += (inner_path->total_cost - inner_path->startup_cost)
-			* innerstartsel;
+			* innerstartsel.selectivity;
 		inner_run_cost = (inner_path->total_cost - inner_path->startup_cost)
-			* (innerendsel - innerstartsel);
+			* (innerendsel.selectivity - innerstartsel.selectivity);
 	}
 
 	/*
@@ -2729,10 +2730,10 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	 * non-unique-ified paths.
 	 */
 	if (IsA(inner_path, UniquePath))
-		innerbucketsize = 1.0 / virtualbuckets;
+		innerbucketsize = selectivity(1.0 / virtualbuckets);
 	else
 	{
-		innerbucketsize = 1.0;
+		innerbucketsize = selectivity_all();
 		foreach(hcl, hashclauses)
 		{
 			RestrictInfo *restrictinfo = (RestrictInfo *) lfirst(hcl);
@@ -2753,7 +2754,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 			{
 				/* righthand side is inner */
 				thisbucketsize = restrictinfo->right_bucketsize;
-				if (thisbucketsize < 0)
+				if (thisbucketsize.selectivity < 0)
 				{
 					/* not cached yet */
 					thisbucketsize =
@@ -2769,7 +2770,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 									 inner_path->parent->relids));
 				/* lefthand side is inner */
 				thisbucketsize = restrictinfo->left_bucketsize;
-				if (thisbucketsize < 0)
+				if (thisbucketsize.selectivity < 0)
 				{
 					/* not cached yet */
 					thisbucketsize =
@@ -2780,7 +2781,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 				}
 			}
 
-			if (innerbucketsize > thisbucketsize)
+			if (innerbucketsize.selectivity > thisbucketsize.selectivity)
 				innerbucketsize = thisbucketsize;
 		}
 	}
@@ -2812,12 +2813,12 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 		 * to clamp inner_scan_frac to at most 1.0; but since match_count is
 		 * at least 1, no such clamp is needed now.)
 		 */
-		outer_matched_rows = rint(outer_path_rows * semifactors->outer_match_frac);
-		inner_scan_frac = 2.0 / (semifactors->match_count + 1.0);
+		outer_matched_rows = rint(outer_path_rows * semifactors->outer_match_frac.selectivity);
+		inner_scan_frac = selectivity(2.0 / (semifactors->match_count.selectivity + 1.0));
 
 		startup_cost += hash_qual_cost.startup;
 		run_cost += hash_qual_cost.per_tuple * outer_matched_rows *
-			clamp_row_est(inner_path_rows * innerbucketsize * inner_scan_frac) * 0.5;
+			clamp_row_est(inner_path_rows * innerbucketsize.selectivity * inner_scan_frac.selectivity) * 0.5;
 
 		/*
 		 * For unmatched outer-rel rows, the picture is quite a lot different.
@@ -2856,7 +2857,7 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 		 */
 		startup_cost += hash_qual_cost.startup;
 		run_cost += hash_qual_cost.per_tuple * outer_path_rows *
-			clamp_row_est(inner_path_rows * innerbucketsize) * 0.5;
+			clamp_row_est(inner_path_rows * innerbucketsize.selectivity) * 0.5;
 
 		/*
 		 * Get approx # tuples passing the hashquals.  We use
@@ -3459,14 +3460,14 @@ compute_semi_anti_join_factors(PlannerInfo *root,
 	 * fewer rows.  This is because we have included all the join clauses in
 	 * the selectivity estimate.
 	 */
-	if (jselec > 0)				/* protect against zero divide */
+	if (jselec.selectivity > 0)				/* protect against zero divide */
 	{
-		avgmatch = nselec * innerrel->rows / jselec;
+		avgmatch = selectivity(nselec.selectivity * innerrel->rows / jselec.selectivity);
 		/* Clamp to sane range */
-		avgmatch = Max(1.0, avgmatch);
+		avgmatch = constrain_selectivity(avgmatch);
 	}
 	else
-		avgmatch = 1.0;
+		avgmatch = selectivity_all();
 
 	semifactors->outer_match_frac = jselec;
 	semifactors->match_count = avgmatch;
@@ -3582,7 +3583,7 @@ approx_tuple_count(PlannerInfo *root, JoinPath *path, List *quals)
 	double		outer_tuples = path->outerjoinpath->rows;
 	double		inner_tuples = path->innerjoinpath->rows;
 	SpecialJoinInfo sjinfo;
-	Selectivity selec = 1.0;
+	Selectivity selec = selectivity_all();
 	ListCell   *l;
 
 	/*
@@ -3608,11 +3609,11 @@ approx_tuple_count(PlannerInfo *root, JoinPath *path, List *quals)
 		Node	   *qual = (Node *) lfirst(l);
 
 		/* Note that clause_selectivity will be able to cache its result */
-		selec *= clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo);
+		selec = selectivity_and(selec, clause_selectivity(root, qual, 0, JOIN_INNER, &sjinfo));
 	}
 
 	/* Apply it to the input relation sizes */
-	tuples = selec * outer_tuples * inner_tuples;
+	tuples = selec.selectivity * outer_tuples * inner_tuples;
 
 	return clamp_row_est(tuples);
 }
@@ -3644,7 +3645,7 @@ set_baserel_size_estimates(PlannerInfo *root, RelOptInfo *rel)
 							   rel->baserestrictinfo,
 							   0,
 							   JOIN_INNER,
-							   NULL);
+							   NULL).selectivity;
 
 	rel->rows = clamp_row_est(nrows);
 
@@ -3681,7 +3682,7 @@ get_parameterized_baserel_size(PlannerInfo *root, RelOptInfo *rel,
 							   allclauses,
 							   rel->relid,		/* do not use 0! */
 							   JOIN_INNER,
-							   NULL);
+							   NULL).selectivity;
 	nrows = clamp_row_est(nrows);
 	/* For safety, make sure result is not more than the base estimate */
 	if (nrows > rel->rows)
@@ -3837,7 +3838,7 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 										0,
 										jointype,
 										sjinfo);
-		pselec = 0.0;			/* not used, keep compiler quiet */
+		pselec = selectivity_none();			/* not used, keep compiler quiet */
 	}
 
 	/*
@@ -3855,29 +3856,29 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 	switch (jointype)
 	{
 		case JOIN_INNER:
-			nrows = outer_rows * inner_rows * jselec;
+			nrows = outer_rows * inner_rows * jselec.selectivity;
 			break;
 		case JOIN_LEFT:
-			nrows = outer_rows * inner_rows * jselec;
+			nrows = outer_rows * inner_rows * jselec.selectivity;
 			if (nrows < outer_rows)
 				nrows = outer_rows;
-			nrows *= pselec;
+			nrows *= pselec.selectivity;
 			break;
 		case JOIN_FULL:
-			nrows = outer_rows * inner_rows * jselec;
+			nrows = outer_rows * inner_rows * jselec.selectivity;
 			if (nrows < outer_rows)
 				nrows = outer_rows;
 			if (nrows < inner_rows)
 				nrows = inner_rows;
-			nrows *= pselec;
+			nrows *= pselec.selectivity;
 			break;
 		case JOIN_SEMI:
-			nrows = outer_rows * jselec;
+			nrows = outer_rows * jselec.selectivity;
 			/* pselec not used */
 			break;
 		case JOIN_ANTI:
-			nrows = outer_rows * (1.0 - jselec);
-			nrows *= pselec;
+			nrows = outer_rows * (1.0 - jselec.selectivity);
+			nrows *= pselec.selectivity;
 			break;
 		default:
 			/* other values not expected here */

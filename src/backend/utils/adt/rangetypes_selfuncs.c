@@ -212,15 +212,15 @@ rangesel(PG_FUNCTION_ARGS)
 	 * OID_RANGE_ELEM_CONTAINED_OP.
 	 */
 	if (constrange)
-		selec = calc_rangesel(typcache, &vardata, constrange, operator);
+		selec = selectivity(calc_rangesel(typcache, &vardata, constrange, operator));
 	else
-		selec = default_range_selectivity(operator);
+		selec = selectivity(default_range_selectivity(operator));
 
 	ReleaseVariableStats(vardata);
 
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_selectivity(selec);
 
-	PG_RETURN_FLOAT8((float8) selec);
+	PG_RETURN_FLOAT8((float8) selec.selectivity);
 }
 
 static double
@@ -572,20 +572,20 @@ static double
 calc_hist_selectivity_scalar(TypeCacheEntry *typcache, RangeBound *constbound,
 							 RangeBound *hist, int hist_nvalues, bool equal)
 {
-	Selectivity selec;
-	int			index;
+	double  selec;
+	int     index;
 
 	/*
 	 * Find the histogram bin the given constant falls into. Estimate
 	 * selectivity as the number of preceding whole bins.
 	 */
 	index = rbound_bsearch(typcache, constbound, hist, hist_nvalues, equal);
-	selec = (Selectivity) (Max(index, 0)) / (Selectivity) (hist_nvalues - 1);
+	selec = (double) (Max(index, 0)) / (double) (hist_nvalues - 1);
 
 	/* Adjust using linear interpolation within the bin */
 	if (index >= 0 && index < hist_nvalues - 1)
 		selec += get_position(typcache, constbound, &hist[index],
-						&hist[index + 1]) / (Selectivity) (hist_nvalues - 1);
+						&hist[index + 1]) / (double) (hist_nvalues - 1);
 
 	return selec;
 }

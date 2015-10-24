@@ -12,7 +12,7 @@
  *
  *-------------------------------------------------------------------------
  */
-#ifndef SELFUNCS_H
+#ifndef SELFUNCS_HN
 #define SELFUNCS_H
 
 #include "fmgr.h"
@@ -24,7 +24,7 @@
  * Note: the default selectivity estimates are not chosen entirely at random.
  * We want them to be small enough to ensure that indexscans will be used if
  * available, for typical table densities of ~100 tuples/page.  Thus, for
- * example, 0.01 is not quite small enough, since that makes it appear that
+ * example, 0.01 is not quite small enough, since that makes it appear thatselectivity
  * nearly all pages will be hit anyway.  Also, since we sometimes estimate
  * eqsel as 1/num_distinct, we probably want DEFAULT_NUM_DISTINCT to equal
  * 1/DEFAULT_EQ_SEL.
@@ -109,6 +109,19 @@ extern PGDLLIMPORT get_index_stats_hook_type get_index_stats_hook;
 
 /* Functions in selfuncs.c */
 
+extern Selectivity selectivity_exactly_one_of(double rows);
+extern Selectivity selectivity_m_of_n(double m, double n);
+extern Selectivity selectivity_and(Selectivity s1, Selectivity s2);
+extern Selectivity selectivity_or(Selectivity s1, Selectivity s2);
+extern Selectivity selectivity_not(Selectivity s);
+extern Selectivity selectivity_andnot(Selectivity s1, Selectivity s2);
+extern Selectivity selectivity_andnot2(Selectivity s1, Selectivity not1, Selectivity not2);
+extern Selectivity selectivity_overlap(Selectivity lorange, Selectivity hirange);
+// straight arithmetic vs set-like operations
+// sum instad of add because add looks like and
+extern Selectivity selectivity_sum(Selectivity s1, Selectivity s2);
+
+
 extern void examine_variable(PlannerInfo *root, Node *node, int varRelid,
 				 VariableStatData *vardata);
 extern bool get_restriction_variable(PlannerInfo *root, List *args,
@@ -182,8 +195,8 @@ extern Selectivity rowcomparesel(PlannerInfo *root,
 
 extern void mergejoinscansel(PlannerInfo *root, Node *clause,
 				 Oid opfamily, int strategy, bool nulls_first,
-				 Selectivity *leftstart, Selectivity *leftend,
-				 Selectivity *rightstart, Selectivity *rightend);
+				 double *leftstart, double *leftend,
+				 double *rightstart, double *rightend);
 
 extern double estimate_num_groups(PlannerInfo *root, List *groupExprs,
 					double input_rows, List **pgset);

@@ -119,14 +119,14 @@ tsmatchsel(PG_FUNCTION_ARGS)
 	else
 	{
 		/* If we can't see the query structure, must punt */
-		selec = DEFAULT_TS_MATCH_SEL;
+		selec = selectivity(DEFAULT_TS_MATCH_SEL);
 	}
 
 	ReleaseVariableStats(vardata);
 
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_selectivity(selec);
 
-	PG_RETURN_FLOAT8((float8) selec);
+	PG_RETURN_FLOAT8((float8) selec.selectivity);
 }
 
 
@@ -157,7 +157,7 @@ tsquerysel(VariableStatData *vardata, Datum constval)
 
 	/* Empty query matches nothing */
 	if (query->size == 0)
-		return (Selectivity) 0.0;
+		return selectivity(0.0);
 
 	if (HeapTupleIsValid(vardata->statsTuple))
 	{
@@ -194,7 +194,7 @@ tsquerysel(VariableStatData *vardata, Datum constval)
 		/*
 		 * MCE stats count only non-null rows, so adjust for null rows.
 		 */
-		selec *= (1.0 - stats->stanullfrac);
+		selec = selectivity_andnot(selec, selectivity(stats->stanullfrac));
 	}
 	else
 	{
@@ -303,7 +303,7 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 		if (oper->prefix)
 		{
 			/* Prefix match, ie the query item is lexeme:* */
-			Selectivity matched,
+			double      matched,
 						allmces;
 			int			i,
 						n_matched;
@@ -323,7 +323,7 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 			 * insufficient stats, arbitrarily use DEFAULT_TS_MATCH_SEL*4.
 			 */
 			if (lookup == NULL || length < 100)
-				return (Selectivity) (DEFAULT_TS_MATCH_SEL * 4);
+				return selectivity(DEFAULT_TS_MATCH_SEL * 4);
 
 			matched = allmces = 0;
 			n_matched = 0;
@@ -343,10 +343,10 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 			}
 
 			/* Clamp to ensure sanity in the face of roundoff error */
-			CLAMP_PROBABILITY(matched);
-			CLAMP_PROBABILITY(allmces);
+			matched = constrain_prob(matched);
+			allmces = constrain_prob(allmces);
 
-			selec = matched + (1.0 - allmces) * ((double) n_matched / length);
+			selec = selectivity(matched + (1.0 - allmces) * ((double) n_matched / length));
 
 			/*
 			 * In any case, never believe that a prefix match has selectivity
@@ -354,7 +354,7 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 			 * preserves the property that "word:*" should be estimated to
 			 * match at least as many rows as "word" would be.
 			 */
-			selec = Max(Min(DEFAULT_TS_MATCH_SEL, minfreq / 2), selec);
+			selec = selectivity(Max(Min(DEFAULT_TS_MATCH_SEL, minfreq / 2), selec.selectivity));
 		}
 		else
 		{
@@ -363,7 +363,7 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 
 			/* If no stats for the variable, use DEFAULT_TS_MATCH_SEL */
 			if (lookup == NULL)
-				return (Selectivity) DEFAULT_TS_MATCH_SEL;
+				return selectivity(DEFAULT_TS_MATCH_SEL);
 
 			searchres = (TextFreq *) bsearch(&key, lookup, length,
 											 sizeof(TextFreq),
@@ -375,7 +375,7 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 				 * The element is in MCELEM.  Return precise selectivity (or
 				 * at least as precise as ANALYZE could find out).
 				 */
-				selec = searchres->frequency;
+				selec = selectivity(searchres->frequency);
 			}
 			else
 			{
@@ -383,7 +383,7 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 				 * The element is not in MCELEM.  Punt, but assume that the
 				 * selectivity cannot be more than minfreq / 2.
 				 */
-				selec = Min(DEFAULT_TS_MATCH_SEL, minfreq / 2);
+				selec = selectivity(Min(DEFAULT_TS_MATCH_SEL, minfreq / 2));
 			}
 		}
 	}
@@ -396,8 +396,8 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 		switch (item->qoperator.oper)
 		{
 			case OP_NOT:
-				selec = 1.0 - tsquery_opr_selec(item + 1, operand,
-												lookup, length, minfreq);
+				selec = selectivity_not(tsquery_opr_selec(item + 1, operand,
+												lookup, length, minfreq));
 				break;
 
 			case OP_AND:
@@ -405,7 +405,7 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 									   lookup, length, minfreq);
 				s2 = tsquery_opr_selec(item + item->qoperator.left, operand,
 									   lookup, length, minfreq);
-				selec = s1 * s2;
+				selec = selectivity_and(s1, s2);
 				break;
 
 			case OP_OR:
@@ -413,18 +413,18 @@ tsquery_opr_selec(QueryItem *item, char *operand,
 									   lookup, length, minfreq);
 				s2 = tsquery_opr_selec(item + item->qoperator.left, operand,
 									   lookup, length, minfreq);
-				selec = s1 + s2 - s1 * s2;
+				selec = selectivity_or(s1, s2);
 				break;
 
 			default:
 				elog(ERROR, "unrecognized operator: %d", item->qoperator.oper);
-				selec = 0;		/* keep compiler quiet */
+				selec = selectivity_none();		/* keep compiler quiet */
 				break;
 		}
 	}
 
 	/* Clamp intermediate results to stay sane despite roundoff error */
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_selectivity(selec);
 
 	return selec;
 }

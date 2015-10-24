@@ -106,7 +106,7 @@ extract_restriction_or_clauses(PlannerInfo *root)
 
 			if (restriction_is_or_clause(rinfo) &&
 				join_clause_is_movable_to(rinfo, rel) &&
-				rinfo->norm_selec <= 1)
+				rinfo->norm_selec.selectivity <= 1)
 			{
 				/* Try to extract a qual for this rel only */
 				Expr	   *orclause = extract_or_clause(rinfo, rel);
@@ -289,7 +289,7 @@ consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,
 	 * original OR clause when the join is formed).  Somewhat arbitrarily, we
 	 * set the selectivity threshold at 0.9.
 	 */
-	if (or_selec > 0.9)
+	if (or_selec.selectivity > 0.9)
 		return;					/* forget it */
 
 	/*
@@ -317,7 +317,7 @@ consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,
 	 * how we ought to adjust outer_selec even if we could compute its
 	 * original value correctly.)
 	 */
-	if (or_selec > 0)
+	if (or_selec.selectivity > 0)
 	{
 		SpecialJoinInfo sjinfo;
 
@@ -345,10 +345,10 @@ consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,
 										0, JOIN_INNER, &sjinfo);
 
 		/* And hack cached selectivity so join size remains the same */
-		join_or_rinfo->norm_selec = orig_selec / or_selec;
+		join_or_rinfo->norm_selec = selectivity(orig_selec.selectivity / or_selec.selectivity);
 		/* ensure result stays in sane range, in particular not "redundant" */
-		if (join_or_rinfo->norm_selec > 1)
-			join_or_rinfo->norm_selec = 1;
+		if (join_or_rinfo->norm_selec.selectivity > 1)
+			join_or_rinfo->norm_selec.selectivity = 1;
 		/* as explained above, we don't touch outer_selec */
 	}
 }

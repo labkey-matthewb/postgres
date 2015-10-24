@@ -19,6 +19,7 @@
 #include "postgres.h"
 
 #include <math.h>
+#include <nodes/nodes.h>
 
 #include "access/htup_details.h"
 #include "catalog/pg_operator.h"
@@ -137,8 +138,8 @@ networksel(PG_FUNCTION_ARGS)
 	 * by MCV entries.
 	 */
 	fmgr_info(get_opcode(operator), &proc);
-	mcv_selec = mcv_selectivity(&vardata, &proc, constvalue, varonleft,
-								&sumcommon);
+	mcv_selec = selectivity(mcv_selectivity(&vardata, &proc, constvalue, varonleft,
+								&sumcommon));
 
 	/*
 	 * If we have a histogram, use it to estimate the proportion of the
@@ -163,17 +164,17 @@ networksel(PG_FUNCTION_ARGS)
 		free_attstatsslot(vardata.atttype, hist_values, hist_nvalues, NULL, 0);
 	}
 	else
-		non_mcv_selec = DEFAULT_SEL(operator);
+		non_mcv_selec = selectivity(DEFAULT_SEL(operator));
 
 	/* Combine selectivities for MCV and non-MCV populations */
-	selec = mcv_selec + (1.0 - nullfrac - sumcommon) * non_mcv_selec;
+	selec = selectivity(mcv_selec.selectivity + (1.0 - nullfrac - sumcommon) * non_mcv_selec.selectivity);
 
 	/* Result should be in range, but make sure... */
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_selectivity(selec);
 
 	ReleaseVariableStats(vardata);
 
-	PG_RETURN_FLOAT8(selec);
+	PG_RETURN_FLOAT8(selec.selectivity);
 }
 
 /*
@@ -204,7 +205,7 @@ networkjoinsel(PG_FUNCTION_ARGS)
 	JoinType	jointype = (JoinType) PG_GETARG_INT16(3);
 #endif
 	SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) PG_GETARG_POINTER(4);
-	double		selec;
+	Selectivity		selec;
 	VariableStatData vardata1;
 	VariableStatData vardata2;
 	bool		join_is_reversed;
@@ -237,16 +238,16 @@ networkjoinsel(PG_FUNCTION_ARGS)
 			/* other values not expected here */
 			elog(ERROR, "unrecognized join type: %d",
 				 (int) sjinfo->jointype);
-			selec = 0;			/* keep compiler quiet */
+			selec = selectivity_none();			/* keep compiler quiet */
 			break;
 	}
 
 	ReleaseVariableStats(vardata1);
 	ReleaseVariableStats(vardata2);
 
-	CLAMP_PROBABILITY(selec);
+	selec = constrain_selectivity(selec);
 
-	PG_RETURN_FLOAT8((float8) selec);
+	PG_RETURN_FLOAT8((float8) selec.selectivity);
 }
 
 /*
@@ -268,9 +269,9 @@ networkjoinsel_inner(Oid operator,
 	Form_pg_statistic stats;
 	double		nullfrac1 = 0.0,
 				nullfrac2 = 0.0;
-	Selectivity selec = 0.0,
-				sumcommon1 = 0.0,
-				sumcommon2 = 0.0;
+	Selectivity selec = selectivity_none(),
+				sumcommon1 = selectivity_none(),
+				sumcommon2 = selectivity_none();
 	bool		mcv1_exists = false,
 				mcv2_exists = false,
 				hist1_exists = false,
@@ -343,9 +344,9 @@ networkjoinsel_inner(Oid operator,
 	 * Calculate selectivity for MCV vs MCV matches.
 	 */
 	if (mcv1_exists && mcv2_exists)
-		selec += inet_mcv_join_sel(mcv1_values, mcv1_numbers, mcv1_length,
+		selec = selectivity_sum(selec, inet_mcv_join_sel(mcv1_values, mcv1_numbers, mcv1_length,
 								   mcv2_values, mcv2_numbers, mcv2_length,
-								   operator);
+								   operator));
 
 	/*
 	 * Add in selectivities for MCV vs histogram matches, scaling according to
@@ -353,33 +354,33 @@ networkjoinsel_inner(Oid operator,
 	 * that the second case needs to commute the operator.
 	 */
 	if (mcv1_exists && hist2_exists)
-		selec += (1.0 - nullfrac2 - sumcommon2) *
+		selec = selectivity(selec.selectivity + (1.0 - nullfrac2 - sumcommon2.selectivity) *
 			inet_mcv_hist_sel(mcv1_values, mcv1_numbers, mcv1_length,
 							  hist2_values, hist2_nvalues,
-							  opr_codenum);
+							  opr_codenum).selectivity);
 	if (mcv2_exists && hist1_exists)
-		selec += (1.0 - nullfrac1 - sumcommon1) *
+		selec = selectivity(selec.selectivity + (1.0 - nullfrac1 - sumcommon1.selectivity) *
 			inet_mcv_hist_sel(mcv2_values, mcv2_numbers, mcv2_length,
 							  hist1_values, hist1_nvalues,
-							  -opr_codenum);
+							  -opr_codenum).selectivity);
 
 	/*
 	 * Add in selectivity for histogram vs histogram matches, again scaling
 	 * appropriately.
 	 */
 	if (hist1_exists && hist2_exists)
-		selec += (1.0 - nullfrac1 - sumcommon1) *
-			(1.0 - nullfrac2 - sumcommon2) *
+		selec = selectivity(selec.selectivity + (1.0 - nullfrac1 - sumcommon1.selectivity) *
+			(1.0 - nullfrac2 - sumcommon2.selectivity) *
 			inet_hist_inclusion_join_sel(hist1_values, hist1_nvalues,
 										 hist2_values, hist2_nvalues,
-										 opr_codenum);
+										 opr_codenum).selectivity);
 
 	/*
 	 * If useful statistics are not available then use the default estimate.
 	 * We can apply null fractions if known, though.
 	 */
 	if ((!mcv1_exists && !hist1_exists) || (!mcv2_exists && !hist2_exists))
-		selec = (1.0 - nullfrac1) * (1.0 - nullfrac2) * DEFAULT_SEL(operator);
+		selec = selectivity((1.0 - nullfrac1) * (1.0 - nullfrac2) * DEFAULT_SEL(operator));
 
 	/* Release stats. */
 	if (mcv1_exists)
@@ -409,9 +410,9 @@ networkjoinsel_semi(Oid operator,
 					VariableStatData *vardata1, VariableStatData *vardata2)
 {
 	Form_pg_statistic stats;
-	Selectivity selec = 0.0,
-				sumcommon1 = 0.0,
-				sumcommon2 = 0.0;
+	Selectivity selec = selectivity_none(),
+				sumcommon1 = selectivity_none(),
+				sumcommon2 = selectivity_none();
 	double		nullfrac1 = 0.0,
 				nullfrac2 = 0.0,
 				hist2_weight = 0.0;
@@ -488,7 +489,7 @@ networkjoinsel_semi(Oid operator,
 
 	/* Estimate number of input rows represented by RHS histogram. */
 	if (hist2_exists && vardata2->rel)
-		hist2_weight = (1.0 - nullfrac2 - sumcommon2) * vardata2->rel->rows;
+		hist2_weight = (1.0 - nullfrac2 - sumcommon2.selectivity) * vardata2->rel->rows;
 
 	/*
 	 * Consider each element of the LHS MCV list, matching it to whatever RHS
@@ -498,12 +499,12 @@ networkjoinsel_semi(Oid operator,
 	{
 		for (i = 0; i < mcv1_length; i++)
 		{
-			selec += mcv1_numbers[i] *
+			selec = selectivity(selec.selectivity + mcv1_numbers[i] *
 				inet_semi_join_sel(mcv1_values[i],
 								   mcv2_exists, mcv2_values, mcv2_length,
 								   hist2_exists, hist2_values, hist2_nvalues,
 								   hist2_weight,
-								   &proc, opr_codenum);
+								   &proc, opr_codenum).selectivity);
 		}
 	}
 
@@ -529,16 +530,16 @@ networkjoinsel_semi(Oid operator,
 		n = 0;
 		for (i = 1; i < hist1_nvalues - 1; i += k)
 		{
-			hist_selec_sum +=
+			hist_selec_sum += hist_selec_sum +
 				inet_semi_join_sel(hist1_values[i],
 								   mcv2_exists, mcv2_values, mcv2_length,
 								   hist2_exists, hist2_values, hist2_nvalues,
 								   hist2_weight,
-								   &proc, opr_codenum);
+								   &proc, opr_codenum).selectivity;
 			n++;
 		}
 
-		selec += (1.0 - nullfrac1 - sumcommon1) * hist_selec_sum / n;
+		selec = selectivity(selec.selectivity + (1.0 - nullfrac1 - sumcommon1.selectivity) * hist_selec_sum / n);
 	}
 
 	/*
@@ -546,7 +547,7 @@ networkjoinsel_semi(Oid operator,
 	 * We can apply null fractions if known, though.
 	 */
 	if ((!mcv1_exists && !hist1_exists) || (!mcv2_exists && !hist2_exists))
-		selec = (1.0 - nullfrac1) * (1.0 - nullfrac2) * DEFAULT_SEL(operator);
+		selec = selectivity((1.0 - nullfrac1) * (1.0 - nullfrac2) * DEFAULT_SEL(operator));
 
 	/* Release stats. */
 	if (mcv1_exists)
@@ -572,7 +573,7 @@ networkjoinsel_semi(Oid operator,
 static Selectivity
 mcv_population(float4 *mcv_numbers, int mcv_nvalues)
 {
-	Selectivity sumcommon = 0.0;
+	double sumcommon = 0.0;
 	int			i;
 
 	for (i = 0; i < mcv_nvalues; i++)
@@ -580,7 +581,7 @@ mcv_population(float4 *mcv_numbers, int mcv_nvalues)
 		sumcommon += mcv_numbers[i];
 	}
 
-	return sumcommon;
+	return selectivity(sumcommon);
 }
 
 /*
@@ -638,7 +639,7 @@ static Selectivity
 inet_hist_value_sel(Datum *values, int nvalues, Datum constvalue,
 					int opr_codenum)
 {
-	Selectivity match = 0.0;
+	double match = 0.0;
 	inet	   *query,
 			   *left,
 			   *right;
@@ -652,7 +653,7 @@ inet_hist_value_sel(Datum *values, int nvalues, Datum constvalue,
 
 	/* guard against zero-divide below */
 	if (nvalues <= 1)
-		return 0.0;
+		return selectivity_none();
 
 	/* if there are too many histogram elements, decimate to limit runtime */
 	k = (nvalues - 2) / MAX_CONSIDERED_ELEMS + 1;
@@ -694,7 +695,7 @@ inet_hist_value_sel(Datum *values, int nvalues, Datum constvalue,
 		n++;
 	}
 
-	return match / n;
+	return selectivity_m_of_n(match, n);
 }
 
 /*
@@ -708,7 +709,7 @@ inet_mcv_join_sel(Datum *mcv1_values, float4 *mcv1_numbers, int mcv1_nvalues,
 				  Datum *mcv2_values, float4 *mcv2_numbers, int mcv2_nvalues,
 				  Oid operator)
 {
-	Selectivity selec = 0.0;
+	double selec = 0.0;
 	FmgrInfo	proc;
 	int			i,
 				j;
@@ -723,7 +724,7 @@ inet_mcv_join_sel(Datum *mcv1_values, float4 *mcv1_numbers, int mcv1_nvalues,
 										   mcv2_values[j])))
 				selec += mcv1_numbers[i] * mcv2_numbers[j];
 	}
-	return selec;
+	return selectivity(selec);
 }
 
 /*
@@ -740,7 +741,7 @@ inet_mcv_hist_sel(Datum *mcv_values, float4 *mcv_numbers, int mcv_nvalues,
 				  Datum *hist_values, int hist_nvalues,
 				  int opr_codenum)
 {
-	Selectivity selec = 0.0;
+	double selec = 0.0;
 	int			i;
 
 	/*
@@ -753,9 +754,9 @@ inet_mcv_hist_sel(Datum *mcv_values, float4 *mcv_numbers, int mcv_nvalues,
 	{
 		selec += mcv_numbers[i] *
 			inet_hist_value_sel(hist_values, hist_nvalues, mcv_values[i],
-								opr_codenum);
+								opr_codenum).selectivity;
 	}
-	return selec;
+	return selectivity(selec);
 }
 
 /*
@@ -783,7 +784,7 @@ inet_hist_inclusion_join_sel(Datum *hist1_values, int hist1_nvalues,
 				n;
 
 	if (hist2_nvalues <= 2)
-		return 0.0;				/* no interior histogram elements */
+		return selectivity_none();				/* no interior histogram elements */
 
 	/* if there are too many histogram elements, decimate to limit runtime */
 	k = (hist2_nvalues - 3) / MAX_CONSIDERED_ELEMS + 1;
@@ -792,11 +793,11 @@ inet_hist_inclusion_join_sel(Datum *hist1_values, int hist1_nvalues,
 	for (i = 1; i < hist2_nvalues - 1; i += k)
 	{
 		match += inet_hist_value_sel(hist1_values, hist1_nvalues,
-									 hist2_values[i], opr_codenum);
+									 hist2_values[i], opr_codenum).selectivity;
 		n++;
 	}
 
-	return match / n;
+	return selectivity_m_of_n(match, n);
 }
 
 /*
@@ -839,7 +840,7 @@ inet_semi_join_sel(Datum lhs_value,
 			if (DatumGetBool(FunctionCall2(proc,
 										   lhs_value,
 										   mcv_values[i])))
-				return 1.0;
+				return selectivity_all();
 		}
 	}
 
@@ -851,11 +852,14 @@ inet_semi_join_sel(Datum lhs_value,
 		hist_selec = inet_hist_value_sel(hist_values, hist_nvalues,
 										 lhs_value, -opr_codenum);
 
-		if (hist_selec > 0)
-			return Min(1.0, hist_weight * hist_selec);
+		if (hist_selec.selectivity > 0)
+		{
+			Selectivity selec = selectivity(hist_weight * hist_selec.selectivity);
+			return constrain_selectivity(selec);
+		}
 	}
 
-	return 0.0;
+	return selectivity_none();
 }
 
 /*

@@ -1605,7 +1605,7 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 		plan->startup_cost = apath->path.startup_cost;
 		plan->total_cost = apath->path.total_cost;
 		plan->plan_rows =
-			clamp_row_est(apath->bitmapselectivity * apath->path.parent->tuples);
+			clamp_row_est(apath->bitmapselectivity.selectivity * apath->path.parent->tuples);
 		plan->plan_width = 0;	/* meaningless */
 		*qual = subquals;
 		*indexqual = subindexquals;
@@ -1667,7 +1667,7 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 			plan->startup_cost = opath->path.startup_cost;
 			plan->total_cost = opath->path.total_cost;
 			plan->plan_rows =
-				clamp_row_est(opath->bitmapselectivity * opath->path.parent->tuples);
+				clamp_row_est(opath->bitmapselectivity.selectivity * opath->path.parent->tuples);
 			plan->plan_width = 0;		/* meaningless */
 		}
 
@@ -1709,7 +1709,7 @@ create_bitmap_subplan(PlannerInfo *root, Path *bitmapqual,
 		plan->startup_cost = 0.0;
 		plan->total_cost = ipath->indextotalcost;
 		plan->plan_rows =
-			clamp_row_est(ipath->indexselectivity * ipath->path.parent->tuples);
+			clamp_row_est(ipath->indexselectivity.selectivity * ipath->path.parent->tuples);
 		plan->plan_width = 0;	/* meaningless */
 		*qual = get_actual_clauses(ipath->indexclauses);
 		*indexqual = get_actual_clauses(ipath->indexquals);

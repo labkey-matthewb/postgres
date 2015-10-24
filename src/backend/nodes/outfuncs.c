@@ -1628,7 +1628,7 @@ _outIndexPath(StringInfo str, const IndexPath *node)
 	WRITE_NODE_FIELD(indexorderbycols);
 	WRITE_ENUM_FIELD(indexscandir, ScanDirection);
 	WRITE_FLOAT_FIELD(indextotalcost, "%.2f");
-	WRITE_FLOAT_FIELD(indexselectivity, "%.4f");
+	WRITE_FLOAT_FIELD(indexselectivity.selectivity, "%.4f");
 }
 
 static void
@@ -1660,7 +1660,7 @@ _outBitmapOrPath(StringInfo str, const BitmapOrPath *node)
 	_outPathInfo(str, (const Path *) node);
 
 	WRITE_NODE_FIELD(bitmapquals);
-	WRITE_FLOAT_FIELD(bitmapselectivity, "%.4f");
+	WRITE_FLOAT_FIELD(bitmapselectivity.selectivity, "%.4f");
 }
 
 static void
@@ -1999,8 +1999,8 @@ _outRestrictInfo(StringInfo str, const RestrictInfo *node)
 	WRITE_BITMAPSET_FIELD(right_relids);
 	WRITE_NODE_FIELD(orclause);
 	/* don't write parent_ec, leads to infinite recursion in plan tree dump */
-	WRITE_FLOAT_FIELD(norm_selec, "%.4f");
-	WRITE_FLOAT_FIELD(outer_selec, "%.4f");
+	WRITE_FLOAT_FIELD(norm_selec.selectivity, "%.4f");
+	WRITE_FLOAT_FIELD(outer_selec.selectivity, "%.4f");
 	WRITE_NODE_FIELD(mergeopfamilies);
 	/* don't write left_ec, leads to infinite recursion in plan tree dump */
 	/* don't write right_ec, leads to infinite recursion in plan tree dump */

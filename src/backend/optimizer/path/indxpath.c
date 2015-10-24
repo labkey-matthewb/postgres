@@ -788,7 +788,7 @@ get_index_paths(PlannerInfo *root, RelOptInfo *rel,
 
 		if (index->amhasgetbitmap &&
 			(ipath->path.pathkeys == NIL ||
-			 ipath->indexselectivity < 1.0))
+			 ipath->indexselectivity.selectivity < 1.0))
 			*bitindexpaths = lappend(*bitindexpaths, ipath);
 	}
 
@@ -1524,9 +1524,9 @@ path_usage_comparator(const void *a, const void *b)
 	if (acost > bcost)
 		return 1;
 
-	if (aselec < bselec)
+	if (aselec.selectivity < bselec.selectivity)
 		return -1;
-	if (aselec > bselec)
+	if (aselec.selectivity > bselec.selectivity)
 		return 1;
 
 	return 0;

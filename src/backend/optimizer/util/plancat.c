@@ -1423,7 +1423,7 @@ restriction_selectivity(PlannerInfo *root,
 	 * selectivity of 0.5
 	 */
 	if (!oprrest)
-		return (Selectivity) 0.5;
+		return selectivity(0.5);
 
 	result = DatumGetFloat8(OidFunctionCall4Coll(oprrest,
 												 inputcollid,
@@ -1435,7 +1435,7 @@ restriction_selectivity(PlannerInfo *root,
 	if (result < 0.0 || result > 1.0)
 		elog(ERROR, "invalid restriction selectivity: %f", result);
 
-	return (Selectivity) result;
+	return selectivity(result);
 }
 
 /*
@@ -1461,7 +1461,7 @@ join_selectivity(PlannerInfo *root,
 	 * selectivity of 0.5
 	 */
 	if (!oprjoin)
-		return (Selectivity) 0.5;
+		return selectivity(0.5);
 
 	result = DatumGetFloat8(OidFunctionCall5Coll(oprjoin,
 												 inputcollid,
@@ -1474,7 +1474,7 @@ join_selectivity(PlannerInfo *root,
 	if (result < 0.0 || result > 1.0)
 		elog(ERROR, "invalid join selectivity: %f", result);
 
-	return (Selectivity) result;
+	return selectivity(result);
 }
 
 /*
